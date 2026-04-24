@@ -70,3 +70,8 @@ npm start
 - `src/store.js` - local JSON metadata store
 - `src/views/index.ejs` - timeline UI
 - `public/styles.css` - page styles
+
+
+to reset the admin password use below comand. remember to install node first.
+1. winget install OpenJS.NodeJS.LTS
+2. node -e "const { randomBytes, scryptSync } = require('node:crypto'); const password = '<your-password>'; const salt = randomBytes(16).toString('hex'); const hash = scryptSync(password, salt, 64).toString('hex'); console.log(salt + ':' + hash);"
