@@ -1,4 +1,4 @@
 node_modules
 .env
 data/posts.json
-.github/workflows/deploy.yml
+# .github/workflows/deploy.yml
