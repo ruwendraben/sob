@@ -6,10 +6,4 @@ services:
       - "3000:3000"
     env_file:
       - .env
-    volumes:
-      - timeline_data:/app/data
     restart: unless-stopped
-
-volumes:
-  timeline_data:
-    name: timeline_data

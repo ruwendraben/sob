@@ -1,90 +1,136 @@
-const fs = require("fs/promises");
-const path = require("path");
+const { Pool } = require("pg");
 
-const dataDir = path.join(__dirname, "..", "data");
-const postsFile = path.join(dataDir, "posts.json");
+const pool = new Pool({
+  host: process.env.DB_HOST,
+  port: parseInt(process.env.DB_PORT, 10),
+  database: process.env.DB_NAME,
+  user: process.env.DB_USER,
+  password: process.env.DB_PASSWORD,
+  ssl: process.env.DB_SSL === "true" ? { rejectUnauthorized: false } : false
+});
+
+function normalizeImages(value) {
+  if (Array.isArray(value)) return value;
+  if (typeof value === "string") {
+    try {
+      const parsed = JSON.parse(value);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  }
+  return [];
+}
 
 async function ensureStorage() {
-  await fs.mkdir(dataDir, { recursive: true });
-  try {
-    await fs.access(postsFile);
-  } catch {
-    await fs.writeFile(postsFile, "[]", "utf8");
-  }
-}
-
-async function readPosts() {
-  await ensureStorage();
-  const raw = await fs.readFile(postsFile, "utf8");
-  const parsed = JSON.parse(raw);
-  return Array.isArray(parsed) ? parsed : [];
-}
-
-async function writePosts(posts) {
-  await fs.writeFile(postsFile, JSON.stringify(posts, null, 2), "utf8");
+  // Tables are already created in RDS; this is now a no-op
+  // but kept for backward compatibility with server.js
 }
 
 async function listPostsNewestFirst() {
-  const posts = await readPosts();
-  return posts.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+  const query = `
+    SELECT id, caption, images, image_url as "imageUrl", image_key as "imageKey", likes, seller_subdomain as "sellerSubdomain", created_at as "createdAt"
+    FROM posts
+    ORDER BY created_at DESC
+  `;
+
+  const result = await pool.query(query);
+  return result.rows.map(row => ({
+    ...row,
+    images: normalizeImages(row.images)
+  }));
 }
 
 async function deletePost(id) {
-  const posts = await readPosts();
-  const idx = posts.findIndex((p) => p.id === id);
-  if (idx === -1) throw new Error("Post not found.");
-  const [removed] = posts.splice(idx, 1);
-  await writePosts(posts);
-  return removed;
+  const query = `
+    DELETE FROM posts
+    WHERE id = $1
+    RETURNING id, caption, images, image_url as "imageUrl", image_key as "imageKey", likes, seller_subdomain as "sellerSubdomain", created_at as "createdAt"
+  `;
+
+  const result = await pool.query(query, [id]);
+
+  if (result.rows.length === 0) {
+    throw new Error("Post not found.");
+  }
+
+  const row = result.rows[0];
+  return {
+    ...row,
+    images: normalizeImages(row.images)
+  };
 }
 
 async function removeImageFromPost(id, imageIndex) {
-  const posts = await readPosts();
-  const post = posts.find((p) => p.id === id);
-  if (!post) throw new Error("Post not found.");
-  const images = post.images || [];
-  if (images.length <= 1) throw new Error("Cannot remove the only image. Delete the post instead.");
-  if (imageIndex < 0 || imageIndex >= images.length) throw new Error("Image index out of range.");
+  // Get the post
+  const selectQuery = `
+    SELECT id, caption, images, image_url as "imageUrl", image_key as "imageKey", likes, seller_subdomain as "sellerSubdomain", created_at as "createdAt"
+    FROM posts
+    WHERE id = $1
+  `;
+
+  const selectResult = await pool.query(selectQuery, [id]);
+
+  if (selectResult.rows.length === 0) {
+    throw new Error("Post not found.");
+  }
+
+  const post = selectResult.rows[0];
+  const images = normalizeImages(post.images);
+
+  if (images.length <= 1) {
+    throw new Error("Cannot remove the only image. Delete the post instead.");
+  }
+
+  if (imageIndex < 0 || imageIndex >= images.length) {
+    throw new Error("Image index out of range.");
+  }
+
   const [removed] = images.splice(imageIndex, 1);
-  post.images = images;
-  post.imageUrl = images[0].url;
-  post.imageKey = images[0].key;
-  await writePosts(posts);
+  const updatedImages = JSON.stringify(images);
+  const newImageUrl = images[0]?.url || null;
+  const newImageKey = images[0]?.key || null;
+
+  // Update the post
+  const updateQuery = `
+    UPDATE posts
+    SET images = $2, image_url = $3, image_key = $4
+    WHERE id = $1
+    RETURNING id, caption, images, image_url as "imageUrl", image_key as "imageKey", likes, seller_subdomain as "sellerSubdomain", created_at as "createdAt"
+  `;
+
+  const updateResult = await pool.query(updateQuery, [id, updatedImages, newImageUrl, newImageKey]);
   return removed;
 }
 
 // ── Sellers ──────────────────────────────────────────────────────────────────
 
-const sellersFile = path.join(dataDir, "sellers.json");
-
-async function ensureSellers() {
-  try { await fs.access(sellersFile); }
-  catch { await fs.writeFile(sellersFile, "[]", "utf8"); }
-}
-
-async function readSellers() {
-  await ensureSellers();
-  const raw = await fs.readFile(sellersFile, "utf8");
-  const parsed = JSON.parse(raw);
-  return Array.isArray(parsed) ? parsed : [];
-}
-
-async function writeSellers(sellers) {
-  await fs.writeFile(sellersFile, JSON.stringify(sellers, null, 2), "utf8");
-}
-
 async function listAllSellerApplications() {
-  const sellers = await readSellers();
-  return sellers.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+  const query = `
+    SELECT id, user_id as "userId", email, subdomain, shop_name as "shopName", brand_name as "brandName", address, tel, brand_logo_url as "brandLogoUrl", brand_logo_key as "brandLogoKey", status, motto, employee_count as "employeeCount", employee_of_year as "employeeOfYear", created_at as "createdAt"
+    FROM sellers
+    ORDER BY created_at DESC
+  `;
+
+  const result = await pool.query(query);
+  return result.rows;
 }
 
 async function updateSellerStatus(id, status) {
-  const sellers = await readSellers();
-  const seller = sellers.find((s) => s.id === id);
-  if (!seller) throw new Error("Seller not found.");
-  seller.status = status;
-  await writeSellers(sellers);
-  return seller;
+  const query = `
+    UPDATE sellers
+    SET status = $2
+    WHERE id = $1
+    RETURNING id, user_id as "userId", email, subdomain, shop_name as "shopName", brand_name as "brandName", address, tel, brand_logo_url as "brandLogoUrl", brand_logo_key as "brandLogoKey", status, motto, employee_count as "employeeCount", employee_of_year as "employeeOfYear", created_at as "createdAt"
+  `;
+
+  const result = await pool.query(query, [id, status]);
+
+  if (result.rows.length === 0) {
+    throw new Error("Seller not found.");
+  }
+
+  return result.rows[0];
 }
 
 module.exports = {

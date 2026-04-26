@@ -1,174 +1,222 @@
-const fs = require("fs/promises");
-const path = require("path");
+const { Pool } = require("pg");
 const crypto = require("crypto");
 
-const dataDir = path.join(__dirname, "..", "data");
-const postsFile = path.join(dataDir, "posts.json");
+const pool = new Pool({
+  host: process.env.DB_HOST,
+  port: parseInt(process.env.DB_PORT, 10),
+  database: process.env.DB_NAME,
+  user: process.env.DB_USER,
+  password: process.env.DB_PASSWORD,
+  ssl: process.env.DB_SSL === "true" ? { rejectUnauthorized: false } : false
+});
+
+function normalizeImages(value) {
+  if (Array.isArray(value)) return value;
+  if (typeof value === "string") {
+    try {
+      const parsed = JSON.parse(value);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  }
+  return [];
+}
 
 async function ensureStorage() {
-  await fs.mkdir(dataDir, { recursive: true });
-  try {
-    await fs.access(postsFile);
-  } catch {
-    await fs.writeFile(postsFile, "[]", "utf8");
-  }
-}
-
-async function readPosts() {
-  await ensureStorage();
-  const raw = await fs.readFile(postsFile, "utf8");
-  const parsed = JSON.parse(raw);
-  return Array.isArray(parsed) ? parsed : [];
-}
-
-async function writePosts(posts) {
-  await fs.writeFile(postsFile, JSON.stringify(posts, null, 2), "utf8");
+  // Tables are already created in RDS; this is now a no-op
+  // but kept for backward compatibility with server.js
 }
 
 async function createPost({ caption, images, sellerSubdomain }) {
-  const posts = await readPosts();
-  const post = {
-    id: crypto.randomUUID(),
-    caption: caption || "",
-    images,
-    imageUrl: images[0].url,
-    imageKey: images[0].key,
-    likes: 0,
-    sellerSubdomain: sellerSubdomain || null,
-    createdAt: new Date().toISOString()
-  };
+  const id = crypto.randomUUID();
+  const imageUrl = images[0]?.url || null;
+  const imageKey = images[0]?.key || null;
+  const imagesJson = JSON.stringify(images);
 
-  posts.push(post);
-  await writePosts(posts);
-  return post;
+  const query = `
+    INSERT INTO posts (id, caption, images, image_url, image_key, likes, seller_subdomain, created_at)
+    VALUES ($1, $2, $3, $4, $5, 0, $6, NOW())
+    RETURNING id, caption, images, image_url as "imageUrl", image_key as "imageKey", likes, seller_subdomain as "sellerSubdomain", created_at as "createdAt"
+  `;
+
+  const result = await pool.query(query, [id, caption || "", imagesJson, imageUrl, imageKey, sellerSubdomain || null]);
+  const row = result.rows[0];
+  return {
+    ...row,
+    images: normalizeImages(row.images)
+  };
 }
 
 async function listPostsNewestFirst() {
-  const posts = await readPosts();
-  return posts.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+  const query = `
+    SELECT id, caption, images, image_url as "imageUrl", image_key as "imageKey", likes, seller_subdomain as "sellerSubdomain", created_at as "createdAt"
+    FROM posts
+    ORDER BY created_at DESC
+  `;
+
+  const result = await pool.query(query);
+  return result.rows.map(row => ({
+    ...row,
+    images: normalizeImages(row.images)
+  }));
 }
 
 async function likePost(id) {
-  const posts = await readPosts();
-  const target = posts.find((post) => post.id === id);
+  const query = `
+    UPDATE posts
+    SET likes = likes + 1
+    WHERE id = $1
+    RETURNING id, caption, images, image_url as "imageUrl", image_key as "imageKey", likes, seller_subdomain as "sellerSubdomain", created_at as "createdAt"
+  `;
 
-  if (!target) {
+  const result = await pool.query(query, [id]);
+
+  if (result.rows.length === 0) {
     throw new Error("Post not found.");
   }
 
-  target.likes += 1;
-  await writePosts(posts);
-  return target;
+  const row = result.rows[0];
+  return {
+    ...row,
+    images: normalizeImages(row.images)
+  };
 }
 
 // ── Users ────────────────────────────────────────────────────────────────────
 
-const usersFile = path.join(dataDir, "users.json");
-
-async function ensureUsers() {
-  try { await fs.access(usersFile); }
-  catch { await fs.writeFile(usersFile, "[]", "utf8"); }
-}
-
-async function readUsers() {
-  await ensureUsers();
-  const raw = await fs.readFile(usersFile, "utf8");
-  const parsed = JSON.parse(raw);
-  return Array.isArray(parsed) ? parsed : [];
-}
-
-async function writeUsers(users) {
-  await fs.writeFile(usersFile, JSON.stringify(users, null, 2), "utf8");
-}
-
 async function createUser({ email, passwordHash }) {
-  const users = await readUsers();
-  if (users.find((u) => u.email === email)) {
+  const id = crypto.randomUUID();
+
+  const checkQuery = `SELECT id FROM users WHERE email = $1`;
+  const checkResult = await pool.query(checkQuery, [email]);
+
+  if (checkResult.rows.length > 0) {
     throw new Error("An account with this email already exists.");
   }
-  const user = {
-    id: crypto.randomUUID(),
-    email,
-    passwordHash,
-    createdAt: new Date().toISOString()
-  };
-  users.push(user);
-  await writeUsers(users);
-  return user;
+
+  const query = `
+    INSERT INTO users (id, email, password_hash, created_at)
+    VALUES ($1, $2, $3, NOW())
+    RETURNING id, email, password_hash as "passwordHash", created_at as "createdAt"
+  `;
+
+  const result = await pool.query(query, [id, email, passwordHash]);
+  return result.rows[0];
 }
 
 async function findUserByEmail(email) {
-  const users = await readUsers();
-  return users.find((u) => u.email === email) || null;
+  const query = `
+    SELECT id, email, password_hash as "passwordHash", created_at as "createdAt"
+    FROM users
+    WHERE email = $1
+  `;
+
+  const result = await pool.query(query, [email]);
+  return result.rows[0] || null;
 }
 
 // ── Sellers ──────────────────────────────────────────────────────────────────
 
-const sellersFile = path.join(dataDir, "sellers.json");
-
-async function ensureSellers() {
-  try { await fs.access(sellersFile); }
-  catch { await fs.writeFile(sellersFile, "[]", "utf8"); }
-}
-
-async function readSellers() {
-  await ensureSellers();
-  const raw = await fs.readFile(sellersFile, "utf8");
-  const parsed = JSON.parse(raw);
-  return Array.isArray(parsed) ? parsed : [];
-}
-
-async function writeSellers(sellers) {
-  await fs.writeFile(sellersFile, JSON.stringify(sellers, null, 2), "utf8");
-}
-
 async function createSellerApplication({ userId, email, subdomain, shopName, brandName, address, tel, brandLogoUrl, brandLogoKey }) {
-  const sellers = await readSellers();
-  if (sellers.find((s) => s.subdomain === subdomain)) {
+  const id = crypto.randomUUID();
+
+  // Check if subdomain already exists
+  const subdomainQuery = `SELECT id FROM sellers WHERE subdomain = $1`;
+  const subdomainResult = await pool.query(subdomainQuery, [subdomain]);
+  if (subdomainResult.rows.length > 0) {
     throw new Error("This subdomain is already taken.");
   }
-  if (sellers.find((s) => s.userId === userId)) {
+
+  // Check if user already has a seller application
+  const userQuery = `SELECT id FROM sellers WHERE user_id = $1`;
+  const userResult = await pool.query(userQuery, [userId]);
+  if (userResult.rows.length > 0) {
     throw new Error("You already have a seller application.");
   }
-  const seller = {
-    id: crypto.randomUUID(),
-    userId,
-    email,
-    subdomain,
-    shopName,
-    brandName,
-    address,
-    tel,
-    brandLogoUrl: brandLogoUrl || null,
-    brandLogoKey: brandLogoKey || null,
-    status: "pending",
-    createdAt: new Date().toISOString()
-  };
-  sellers.push(seller);
-  await writeSellers(sellers);
-  return seller;
+
+  const query = `
+    INSERT INTO sellers (id, user_id, email, subdomain, shop_name, brand_name, address, tel, brand_logo_url, brand_logo_key, status, created_at)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'pending', NOW())
+    RETURNING id, user_id as "userId", email, subdomain, shop_name as "shopName", brand_name as "brandName", address, tel, brand_logo_url as "brandLogoUrl", brand_logo_key as "brandLogoKey", status, created_at as "createdAt"
+  `;
+
+  const result = await pool.query(query, [id, userId, email, subdomain, shopName, brandName, address, tel, brandLogoUrl || null, brandLogoKey || null]);
+  return result.rows[0];
 }
 
 async function findSellerByUserId(userId) {
-  const sellers = await readSellers();
-  return sellers.find((s) => s.userId === userId) || null;
+  const query = `
+    SELECT id, user_id as "userId", email, subdomain, shop_name as "shopName", brand_name as "brandName", address, tel, brand_logo_url as "brandLogoUrl", brand_logo_key as "brandLogoKey", status, motto, employee_count as "employeeCount", employee_of_year as "employeeOfYear", created_at as "createdAt"
+    FROM sellers
+    WHERE user_id = $1
+  `;
+
+  const result = await pool.query(query, [userId]);
+  return result.rows[0] || null;
 }
 
 async function findSellerBySubdomain(subdomain) {
-  const sellers = await readSellers();
-  return sellers.find((s) => s.subdomain === subdomain) || null;
+  const query = `
+    SELECT id, user_id as "userId", email, subdomain, shop_name as "shopName", brand_name as "brandName", address, tel, brand_logo_url as "brandLogoUrl", brand_logo_key as "brandLogoKey", status, motto, employee_count as "employeeCount", employee_of_year as "employeeOfYear", created_at as "createdAt"
+    FROM sellers
+    WHERE subdomain = $1
+  `;
+
+  const result = await pool.query(query, [subdomain]);
+  return result.rows[0] || null;
 }
 
 async function updateSellerProfile(userId, updates) {
-  const sellers = await readSellers();
-  const seller = sellers.find((s) => s.userId === userId);
-  if (!seller) throw new Error("Seller not found.");
   const allowed = ["shopName", "brandName", "address", "tel", "motto", "employeeCount", "employeeOfYear", "brandLogoUrl", "brandLogoKey"];
+
+  // Build dynamic SET clause
+  const setClauses = [];
+  const values = [userId];
+  let paramCount = 2;
+
+  const columnMap = {
+    shopName: "shop_name",
+    brandName: "brand_name",
+    address: "address",
+    tel: "tel",
+    motto: "motto",
+    employeeCount: "employee_count",
+    employeeOfYear: "employee_of_year",
+    brandLogoUrl: "brand_logo_url",
+    brandLogoKey: "brand_logo_key"
+  };
+
   for (const key of allowed) {
-    if (key in updates) seller[key] = updates[key];
+    if (key in updates) {
+      setClauses.push(`${columnMap[key]} = $${paramCount}`);
+      values.push(updates[key]);
+      paramCount++;
+    }
   }
-  await writeSellers(sellers);
-  return seller;
+
+  if (setClauses.length === 0) {
+    // No updates, just return the current seller
+    const query = `
+      SELECT id, user_id as "userId", email, subdomain, shop_name as "shopName", brand_name as "brandName", address, tel, brand_logo_url as "brandLogoUrl", brand_logo_key as "brandLogoKey", status, motto, employee_count as "employeeCount", employee_of_year as "employeeOfYear", created_at as "createdAt"
+      FROM sellers
+      WHERE user_id = $1
+    `;
+    const result = await pool.query(query, [userId]);
+    if (result.rows.length === 0) throw new Error("Seller not found.");
+    return result.rows[0];
+  }
+
+  const query = `
+    UPDATE sellers
+    SET ${setClauses.join(", ")}
+    WHERE user_id = $1
+    RETURNING id, user_id as "userId", email, subdomain, shop_name as "shopName", brand_name as "brandName", address, tel, brand_logo_url as "brandLogoUrl", brand_logo_key as "brandLogoKey", status, motto, employee_count as "employeeCount", employee_of_year as "employeeOfYear", created_at as "createdAt"
+  `;
+
+  const result = await pool.query(query, values);
+  if (result.rows.length === 0) throw new Error("Seller not found.");
+  return result.rows[0];
 }
 
 module.exports = {
