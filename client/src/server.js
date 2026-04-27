@@ -1,9 +1,11 @@
+const dotenv = require("dotenv");
+dotenv.config();
+
 const path = require("path");
 const crypto = require("crypto");
 const express = require("express");
 const session = require("express-session");
 const multer = require("multer");
-const dotenv = require("dotenv");
 const {
   createPost,
   listPostsNewestFirst,
@@ -18,8 +20,6 @@ const {
 } = require("./store");
 const { uploadImageToS3, uploadLogoToS3 } = require("./s3");
 const { getParameter } = require("./ssm");
-
-dotenv.config();
 
 function hashPassword(password) {
   const salt = crypto.randomBytes(16).toString("hex");

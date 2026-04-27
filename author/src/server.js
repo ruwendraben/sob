@@ -1,8 +1,10 @@
+const dotenv = require("dotenv");
+dotenv.config();
+
 const path = require("path");
 const crypto = require("crypto");
 const express = require("express");
 const session = require("express-session");
-const dotenv = require("dotenv");
 const {
   listPostsNewestFirst,
   deletePost,
@@ -12,8 +14,6 @@ const {
 } = require("./store");
 const { deleteImageFromS3 } = require("./s3");
 const { getParameter } = require("./ssm");
-
-dotenv.config();
 
 const port = Number(process.env.PORT || 3001);
 const ADMIN_USERNAME = process.env.ADMIN_USERNAME || "";

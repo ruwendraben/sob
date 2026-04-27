@@ -2,25 +2,19 @@ const path = require("path");
 const crypto = require("crypto");
 const { S3Client, PutObjectCommand } = require("@aws-sdk/client-s3");
 
-const region = process.env.AWS_REGION;
-const bucketName = process.env.S3_BUCKET_NAME;
-
 function getClient() {
+  const region = process.env.AWS_REGION;
+  const bucketName = process.env.S3_BUCKET_NAME;
+
   if (!region || !bucketName) {
     throw new Error("AWS_REGION and S3_BUCKET_NAME are required.");
   }
 
-  return new S3Client({
-    region,
-    credentials: {
-      accessKeyId: process.env.AWS_ACCESS_KEY_ID || "",
-      secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY || ""
-    }
-  });
+  return new S3Client({ region });
 }
 
 function buildObjectUrl(key) {
-  return `https://${bucketName}.s3.${region}.amazonaws.com/${key}`;
+  return `https://${process.env.S3_BUCKET_NAME}.s3.${process.env.AWS_REGION}.amazonaws.com/${key}`;
 }
 
 function makeObjectKey(originalName = "upload") {
@@ -40,7 +34,7 @@ async function uploadImageToS3(file) {
 
   await client.send(
     new PutObjectCommand({
-      Bucket: bucketName,
+      Bucket: process.env.S3_BUCKET_NAME,
       Key: key,
       Body: file.buffer,
       ContentType: file.mimetype
@@ -69,7 +63,7 @@ async function uploadLogoToS3(file) {
 
   await client.send(
     new PutObjectCommand({
-      Bucket: bucketName,
+      Bucket: process.env.S3_BUCKET_NAME,
       Key: key,
       Body: file.buffer,
       ContentType: file.mimetype
