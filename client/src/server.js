@@ -169,7 +169,7 @@ async function start() {
   }, async (req, res, next) => {
     try {
       const result = await likePost(req.params.id, req.session.user.id);
-      res.json({ likes: result.post.likes, alreadyLiked: result.alreadyLiked });
+      res.json({ likes: result.post.likes, likedByUser: result.likedByUser });
     } catch (error) {
       next(error);
     }

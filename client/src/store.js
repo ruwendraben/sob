@@ -102,7 +102,9 @@ async function likePost(id, userId) {
     );
 
     let result;
+    let likedByUser = false;
     if (insertLike.rows.length > 0) {
+      likedByUser = true;
       result = await client.query(
         `
           UPDATE posts
@@ -113,7 +115,28 @@ async function likePost(id, userId) {
         [id]
       );
     } else {
-      result = await client.query(
+      const deleteLike = await client.query(
+        `
+          DELETE FROM post_likes
+          WHERE post_id = $1 AND user_id = $2
+          RETURNING post_id
+        `,
+        [id, userId]
+      );
+
+      likedByUser = false;
+      if (deleteLike.rows.length > 0) {
+        result = await client.query(
+          `
+            UPDATE posts
+            SET likes = GREATEST(likes - 1, 0)
+            WHERE id = $1
+            RETURNING id, caption, images, image_url as "imageUrl", image_key as "imageKey", likes, seller_subdomain as "sellerSubdomain", created_at as "createdAt"
+          `,
+          [id]
+        );
+      } else {
+        result = await client.query(
         `
           SELECT id, caption, images, image_url as "imageUrl", image_key as "imageKey", likes, seller_subdomain as "sellerSubdomain", created_at as "createdAt"
           FROM posts
@@ -121,6 +144,7 @@ async function likePost(id, userId) {
         `,
         [id]
       );
+      }
     }
 
     if (result.rows.length === 0) {
@@ -135,7 +159,7 @@ async function likePost(id, userId) {
         ...row,
         images: normalizeImages(row.images)
       },
-      alreadyLiked: insertLike.rows.length === 0
+      likedByUser
     };
   } catch (error) {
     await client.query("ROLLBACK");
