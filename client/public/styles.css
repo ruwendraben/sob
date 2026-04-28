@@ -82,6 +82,19 @@ button:hover {
   color: #1877f2;
 }
 
+.like-btn:disabled,
+.like-btn:disabled:hover,
+.like-btn.like-readonly,
+.like-btn.like-readonly:hover {
+  background: transparent;
+  color: #65676b;
+  cursor: default;
+}
+
+.like-btn:disabled {
+  opacity: 0.9;
+}
+
 .like-btn.liked {
   color: #1877f2;
 }

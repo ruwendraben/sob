@@ -96,19 +96,31 @@
 
               <div class="post-meta">
                 <span><%= new Date(post.createdAt).toLocaleString() %></span>
+                <% if (user) { %>
                 <button
                   type="button"
                   class="like-btn<%= post.likes > 0 ? ' liked' : '' %>"
                   data-id="<%= post.id %>"
                   data-likes="<%= post.likes %>"
+                  data-can-like="true"
                   aria-label="Like post"
+                  <%= post.likedByUser ? 'disabled' : '' %>
                 >
                   <svg class="like-thumb" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
                     <path d="M1 21h4V9H1v12zm22-11c0-1.1-.9-2-2-2h-6.31l.95-4.57.03-.32c0-.41-.17-.79-.44-1.06L14.17 1 7.59 7.59C7.22 7.95 7 8.45 7 9v10c0 1.1.9 2 2 2h9c.83 0 1.54-.5 1.84-1.22l3.02-7.05c.09-.23.14-.47.14-.73v-2z"/>
                   </svg>
-                  <span class="like-label">Like</span>
-                  <span class="like-count"><%= post.likes > 0 ? post.likes : '' %></span>
+                  <span class="like-label"><%= post.likedByUser ? 'Liked' : 'Like' %></span>
+                  <span class="like-count"><%= post.likes %></span>
                 </button>
+                <% } else { %>
+                <span class="like-btn like-readonly" aria-label="Like count">
+                  <svg class="like-thumb" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                    <path d="M1 21h4V9H1v12zm22-11c0-1.1-.9-2-2-2h-6.31l.95-4.57.03-.32c0-.41-.17-.79-.44-1.06L14.17 1 7.59 7.59C7.22 7.95 7 8.45 7 9v10c0 1.1.9 2 2 2h9c.83 0 1.54-.5 1.84-1.22l3.02-7.05c.09-.23.14-.47.14-.73v-2z"/>
+                  </svg>
+                  <span class="like-label">Like</span>
+                  <span class="like-count"><%= post.likes %></span>
+                </span>
+                <% } %>
               </div>
               <% if (post.sellerSubdomain) { %>
                 <a href="https://<%= post.sellerSubdomain %>.shopsonboard.com" target="_blank" class="seller-post-link">
@@ -173,17 +185,26 @@
       });
     }());
 
-    // Facebook-style like buttons
-    document.querySelectorAll('.like-btn').forEach(function (btn) {
+    // Like buttons (signed-in users only)
+    document.querySelectorAll('.like-btn[data-can-like="true"]').forEach(function (btn) {
       btn.addEventListener('click', function () {
+        if (btn.disabled) return;
         var id = btn.dataset.id;
         fetch('/posts/' + id + '/like', { method: 'POST' })
-          .then(function (r) { return r.json(); })
+          .then(function (r) {
+            if (!r.ok) throw new Error('Unable to like this post.');
+            return r.json();
+          })
           .then(function (data) {
             btn.dataset.likes = data.likes;
+            btn.disabled = true;
             btn.classList.add('liked', 'pop');
-            btn.querySelector('.like-count').textContent = data.likes > 0 ? data.likes : '';
+            btn.querySelector('.like-label').textContent = 'Liked';
+            btn.querySelector('.like-count').textContent = data.likes;
             setTimeout(function () { btn.classList.remove('pop'); }, 300);
+          })
+          .catch(function () {
+            // Keep UI stable on request failures.
           });
       });
     });

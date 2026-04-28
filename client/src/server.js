@@ -100,7 +100,7 @@ async function start() {
 
   app.get("/", async (req, res, next) => {
     try {
-      const posts = await listPostsNewestFirst();
+      const posts = await listPostsNewestFirst(req.session.user ? req.session.user.id : null);
       let seller = null;
       if (req.session.user) {
         seller = await findSellerByUserId(req.session.user.id);
@@ -126,7 +126,7 @@ async function start() {
       const caption = (req.body.caption || "").trim();
 
       if (!req.files || req.files.length === 0) {
-        const posts = await listPostsNewestFirst();
+        const posts = await listPostsNewestFirst(req.session.user ? req.session.user.id : null);
         return res.status(400).render("index", {
           posts,
           error: "Please choose at least one image to upload.",
@@ -149,7 +149,7 @@ async function start() {
       await createPost({ caption, images, sellerSubdomain });
       res.redirect("/?success=Post+published");
     } catch (error) {
-      const posts = await listPostsNewestFirst();
+      const posts = await listPostsNewestFirst(req.session.user ? req.session.user.id : null);
       res.status(400).render("index", {
         posts,
         error: error.message || "Upload failed. Please try again.",
@@ -161,10 +161,15 @@ async function start() {
     }
   });
 
-  app.post("/posts/:id/like", async (req, res, next) => {
+  app.post("/posts/:id/like", (req, res, next) => {
+    if (!req.session.user) {
+      return res.status(401).json({ error: "Please sign in to like posts." });
+    }
+    next();
+  }, async (req, res, next) => {
     try {
-      const post = await likePost(req.params.id);
-      res.json({ likes: post.likes });
+      const result = await likePost(req.params.id, req.session.user.id);
+      res.json({ likes: result.post.likes, alreadyLiked: result.alreadyLiked });
     } catch (error) {
       next(error);
     }
@@ -341,7 +346,7 @@ async function start() {
 
   app.use(async (error, req, res, _next) => {
     if (error instanceof multer.MulterError && error.code === "LIMIT_FILE_SIZE") {
-      const posts = await listPostsNewestFirst();
+      const posts = await listPostsNewestFirst(req.session.user ? req.session.user.id : null);
       return res.status(400).render("index", {
         posts,
         error: `Image is too large. Max size is ${maxFileSizeMb}MB.`,
@@ -351,7 +356,7 @@ async function start() {
         seller: null
       });
     }
-    const posts = await listPostsNewestFirst();
+    const posts = await listPostsNewestFirst(req.session.user ? req.session.user.id : null);
     res.status(500).render("index", {
       posts,
       error: error.message || "Unexpected error.",

@@ -24,8 +24,15 @@ function normalizeImages(value) {
 }
 
 async function ensureStorage() {
-  // Tables are already created in RDS; this is now a no-op
-  // but kept for backward compatibility with server.js
+  const query = `
+    CREATE TABLE IF NOT EXISTS post_likes (
+      post_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (post_id, user_id)
+    )
+  `;
+  await pool.query(query);
 }
 
 async function createPost({ caption, images, sellerSubdomain }) {
@@ -48,39 +55,94 @@ async function createPost({ caption, images, sellerSubdomain }) {
   };
 }
 
-async function listPostsNewestFirst() {
+async function listPostsNewestFirst(userId = null) {
   const query = `
-    SELECT id, caption, images, image_url as "imageUrl", image_key as "imageKey", likes, seller_subdomain as "sellerSubdomain", created_at as "createdAt"
-    FROM posts
-    ORDER BY created_at DESC
+    SELECT
+      p.id,
+      p.caption,
+      p.images,
+      p.image_url as "imageUrl",
+      p.image_key as "imageKey",
+      p.likes,
+      p.seller_subdomain as "sellerSubdomain",
+      p.created_at as "createdAt",
+      EXISTS (
+        SELECT 1
+        FROM post_likes pl
+        WHERE pl.post_id = p.id AND pl.user_id = $1
+      ) as "likedByUser"
+    FROM posts p
+    ORDER BY p.created_at DESC
   `;
 
-  const result = await pool.query(query);
+  const result = await pool.query(query, [userId || ""]);
   return result.rows.map(row => ({
     ...row,
     images: normalizeImages(row.images)
   }));
 }
 
-async function likePost(id) {
-  const query = `
-    UPDATE posts
-    SET likes = likes + 1
-    WHERE id = $1
-    RETURNING id, caption, images, image_url as "imageUrl", image_key as "imageKey", likes, seller_subdomain as "sellerSubdomain", created_at as "createdAt"
-  `;
-
-  const result = await pool.query(query, [id]);
-
-  if (result.rows.length === 0) {
-    throw new Error("Post not found.");
+async function likePost(id, userId) {
+  if (!userId) {
+    throw new Error("Login required.");
   }
 
-  const row = result.rows[0];
-  return {
-    ...row,
-    images: normalizeImages(row.images)
-  };
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+
+    const insertLike = await client.query(
+      `
+        INSERT INTO post_likes (post_id, user_id)
+        VALUES ($1, $2)
+        ON CONFLICT DO NOTHING
+        RETURNING post_id
+      `,
+      [id, userId]
+    );
+
+    let result;
+    if (insertLike.rows.length > 0) {
+      result = await client.query(
+        `
+          UPDATE posts
+          SET likes = likes + 1
+          WHERE id = $1
+          RETURNING id, caption, images, image_url as "imageUrl", image_key as "imageKey", likes, seller_subdomain as "sellerSubdomain", created_at as "createdAt"
+        `,
+        [id]
+      );
+    } else {
+      result = await client.query(
+        `
+          SELECT id, caption, images, image_url as "imageUrl", image_key as "imageKey", likes, seller_subdomain as "sellerSubdomain", created_at as "createdAt"
+          FROM posts
+          WHERE id = $1
+        `,
+        [id]
+      );
+    }
+
+    if (result.rows.length === 0) {
+      throw new Error("Post not found.");
+    }
+
+    await client.query("COMMIT");
+
+    const row = result.rows[0];
+    return {
+      post: {
+        ...row,
+        images: normalizeImages(row.images)
+      },
+      alreadyLiked: insertLike.rows.length === 0
+    };
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 // ── Users ────────────────────────────────────────────────────────────────────
