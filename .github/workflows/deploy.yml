@@ -1,31 +1,31 @@
-name: Deploy to ECR
+name: Deploy to ECR and Rollout on EC2 (SSM)
 
 on:
   push:
     branches: [master]
 
 jobs:
-  deploy:
+  build_push:
     runs-on: ubuntu-latest
     environment: dev
     strategy:
       matrix:
         app: [client, author]
-    
+
     steps:
       - uses: actions/checkout@v5
-      
+
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: eu-west-2
-      
+
       - name: Login to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
-      
+
       - name: Build and push Docker image (${{ matrix.app }})
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
@@ -37,3 +37,74 @@ jobs:
           docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:latest
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
         working-directory: ${{ matrix.app }}
+
+  rollout_ec2:
+    runs-on: ubuntu-latest
+    environment: dev
+    needs: build_push
+
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: eu-west-2
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Redeploy containers on EC2 via SSM
+        id: ssm
+        env:
+          AWS_REGION: eu-west-2
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          INSTANCE_TAG_NAME: tf-dev
+        run: |
+          COMMAND_ID=$(aws ssm send-command \
+            --region "$AWS_REGION" \
+            --document-name "AWS-RunShellScript" \
+            --targets "Key=tag:Name,Values=$INSTANCE_TAG_NAME" \
+            --comment "SOB app rollout from GitHub Actions ${GITHUB_SHA}" \
+            --parameters "commands=[
+              \"set -e\",
+              \"aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $ECR_REGISTRY\",
+              \"docker pull $ECR_REGISTRY/sob/client:latest\",
+              \"docker pull $ECR_REGISTRY/sob/author:latest\",
+              \"docker rm -f sob-client || true\",
+              \"docker rm -f sob-author || true\",
+              \"docker run -d --name sob-client --restart unless-stopped --env-file /opt/client.env -p 80:3000 $ECR_REGISTRY/sob/client:latest\",
+              \"docker run -d --name sob-author --restart unless-stopped --env-file /opt/author.env -p 3001:3001 $ECR_REGISTRY/sob/author:latest\",
+              \"docker ps --format \\\"table {{.Names}}\\t{{.Image}}\\t{{.Status}}\\\" \"
+            ]" \
+            --query "Command.CommandId" \
+            --output text)
+          echo "command_id=$COMMAND_ID" >> $GITHUB_OUTPUT
+
+      - name: Wait for rollout command to finish
+        env:
+          AWS_REGION: eu-west-2
+          INSTANCE_TAG_NAME: tf-dev
+          COMMAND_ID: ${{ steps.ssm.outputs.command_id }}
+        run: |
+          INSTANCE_ID=$(aws ec2 describe-instances \
+            --region "$AWS_REGION" \
+            --filters "Name=tag:Name,Values=$INSTANCE_TAG_NAME" "Name=instance-state-name,Values=running" \
+            --query "Reservations[0].Instances[0].InstanceId" \
+            --output text)
+
+          aws ssm wait command-executed \
+            --region "$AWS_REGION" \
+            --command-id "$COMMAND_ID" \
+            --instance-id "$INSTANCE_ID"
+
+          STATUS=$(aws ssm get-command-invocation \
+            --region "$AWS_REGION" \
+            --command-id "$COMMAND_ID" \
+            --instance-id "$INSTANCE_ID" \
+            --query "Status" \
+            --output text)
+
+          echo "SSM status: $STATUS"
+          test "$STATUS" = "Success"
